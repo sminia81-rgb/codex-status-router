@@ -1,0 +1,26 @@
+{
+  "name": "codex-status-router",
+  "version": "0.1.0",
+  "description": "Sol/xhigh defaults, adaptive per-request model routing, and a compact Codex TUI status line.",
+  "author": {
+    "name": "sminia81-rgb",
+    "url": "https://github.com/sminia81-rgb"
+  },
+  "homepage": "https://github.com/sminia81-rgb/codex-status-router#readme",
+  "repository": "https://github.com/sminia81-rgb/codex-status-router",
+  "license": "MIT",
+  "keywords": ["codex", "model-routing", "status-line", "gpt-5.6"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Status Router",
+    "shortDescription": "Sol/xhigh defaults with adaptive model savings.",
+    "longDescription": "Keeps substantive Codex work on GPT-5.6 Sol/xhigh, routes only clearly simpler requests to lower-cost models, and documents a compact TUI status line setup.",
+    "developerName": "smini",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "Show my current adaptive model-routing status.",
+      "Explain which model this request should use."
+    ]
+  }
+}
