@@ -1,0 +1,12 @@
+# The installer merges these values into the existing user config.
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+
+[tui]
+status_line = [
+    "weekly-limit",
+    "project-name",
+    "model",
+    "reasoning",
+    "context-used",
+]
