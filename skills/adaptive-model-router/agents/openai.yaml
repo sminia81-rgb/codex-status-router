@@ -1,0 +1,7 @@
+interface:
+  display_name: "Adaptive Model Router"
+  short_description: "Sol/xhigh 기본, 단순 요청만 저비용 모델로 전환"
+  default_prompt: "Use $adaptive-model-router to keep substantive work on Sol/xhigh and down-route only clearly simple requests."
+
+policy:
+  allow_implicit_invocation: true
