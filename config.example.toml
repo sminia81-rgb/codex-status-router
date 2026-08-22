@@ -1,4 +1,5 @@
 # The installer merges these values into the existing user config.
+# It also writes a user-specific notify command for scripts/codex-discord-notify.ps1.
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 

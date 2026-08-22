@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string] $TargetUserProfile = $env:USERPROFILE,
-    [string] $TargetCodexHome = $env:CODEX_HOME
+    [string] $TargetCodexHome = $env:CODEX_HOME,
+    [string] $DiscordWebhookUrl = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,6 +28,7 @@ $targetAgentsHome = Join-Path $TargetUserProfile '.agents'
 $targetSkill = Join-Path $targetAgentsHome 'skills\adaptive-model-router'
 $targetConfig = Join-Path $TargetCodexHome 'config.toml'
 $targetAgentsFile = Join-Path $TargetCodexHome 'AGENTS.md'
+$targetNotifier = Join-Path $TargetCodexHome 'scripts\codex-discord-notify.ps1'
 $backupRoot = Join-Path $TargetCodexHome ('backups\codex-status-router-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
@@ -84,6 +86,75 @@ function Set-TopLevelTomlValue {
 
     $lines.Insert(0, "$Key = $TomlValue")
     return [string]::Join("`n", $lines)
+}
+
+function ConvertTo-TomlBasicString {
+    param([Parameter(Mandatory)][string] $Value)
+    return ConvertTo-Json -InputObject $Value -Compress
+}
+
+function Set-TopLevelTomlArray {
+    param(
+        [Parameter(Mandatory)][string] $Text,
+        [Parameter(Mandatory)][string] $Key,
+        [Parameter(Mandatory)][string[]] $Values
+    )
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($Text -replace "`r`n", "`n" -split "`n")) { $lines.Add($line) }
+    $firstSection = $lines.Count
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match '^\s*\[') { $firstSection = $index; break }
+    }
+
+    $escapedKey = [regex]::Escape($Key)
+    $assignmentStart = -1
+    for ($index = 0; $index -lt $firstSection; $index++) {
+        if ($lines[$index] -match "^\s*$escapedKey\s*=") {
+            $assignmentStart = $index
+            break
+        }
+    }
+
+    if ($assignmentStart -ge 0) {
+        $assignmentEnd = $assignmentStart
+        if ($lines[$assignmentStart] -notmatch '\]') {
+            for ($index = $assignmentStart + 1; $index -lt $firstSection; $index++) {
+                $assignmentEnd = $index
+                if ($lines[$index] -match '\]') { break }
+            }
+            if ($lines[$assignmentEnd] -notmatch '\]') {
+                throw "Unterminated top-level TOML array: $Key"
+            }
+        }
+        $lines.RemoveRange($assignmentStart, $assignmentEnd - $assignmentStart + 1)
+    } else {
+        $assignmentStart = 0
+    }
+
+    $arrayLines = [System.Collections.Generic.List[string]]::new()
+    $arrayLines.Add("$Key = [")
+    foreach ($value in $Values) {
+        $arrayLines.Add('    ' + (ConvertTo-TomlBasicString -Value $value) + ',')
+    }
+    $arrayLines.Add(']')
+    for ($index = $arrayLines.Count - 1; $index -ge 0; $index--) {
+        $lines.Insert($assignmentStart, $arrayLines[$index])
+    }
+
+    return [string]::Join("`n", $lines)
+}
+
+function Test-DiscordWebhookUrl {
+    param([Parameter(Mandatory)][string] $Value)
+
+    $uri = $null
+    if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref] $uri)) { return $false }
+    if ($uri.Scheme -ne 'https') { return $false }
+    if ($uri.Host -notin @('discord.com', 'canary.discord.com', 'ptb.discord.com', 'discordapp.com')) {
+        return $false
+    }
+    return $uri.AbsolutePath -match '^/api(?:/v\d+)?/webhooks/\d+/[^/]+/?$'
 }
 
 function Set-TuiStatusLine {
@@ -162,13 +233,44 @@ function Set-RoutingInstructions {
     return "$withoutExistingBlock`n`n$cleanBlock`n"
 }
 
+if (-not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
+    if (-not (Test-DiscordWebhookUrl -Value $DiscordWebhookUrl)) {
+        throw 'DiscordWebhookUrl must be an HTTPS Discord webhook URL.'
+    }
+
+    $currentUserProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
+    if (-not $TargetUserProfile.TrimEnd('\').Equals($currentUserProfile, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'DiscordWebhookUrl can only be saved when TargetUserProfile is the current Windows user.'
+    }
+}
+
 Backup-Target -Path $targetConfig -Name 'config.toml'
 Backup-Target -Path $targetAgentsFile -Name 'AGENTS.md'
 Backup-Target -Path $targetSkill -Name 'adaptive-model-router'
+Backup-Target -Path $targetNotifier -Name 'codex-discord-notify.ps1'
+
+$systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot')
+$windowsPowerShell = if ([string]::IsNullOrWhiteSpace($systemRoot)) {
+    (Get-Command 'powershell.exe' -ErrorAction Stop).Source
+} else {
+    Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+}
+if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+    $windowsPowerShell = (Get-Command 'powershell.exe' -ErrorAction Stop).Source
+}
 
 $configText = Read-TextFile -Path $targetConfig
 $configText = Set-TopLevelTomlValue -Text $configText -Key 'model' -TomlValue '"gpt-5.6-sol"'
 $configText = Set-TopLevelTomlValue -Text $configText -Key 'model_reasoning_effort' -TomlValue '"xhigh"'
+$configText = Set-TopLevelTomlArray -Text $configText -Key 'notify' -Values @(
+    $windowsPowerShell,
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    $targetNotifier
+)
 $configText = Set-TuiStatusLine -Text $configText
 Write-TextFile -Path $targetConfig -Text $configText
 
@@ -181,12 +283,24 @@ $sourceSkill = Join-Path $sourceRoot 'skills\adaptive-model-router'
 Copy-Item -LiteralPath (Join-Path $sourceSkill 'SKILL.md') -Destination (Join-Path $targetSkill 'SKILL.md') -Force
 Copy-Item -LiteralPath (Join-Path $sourceSkill 'agents\openai.yaml') -Destination (Join-Path $targetSkill 'agents\openai.yaml') -Force
 
+[System.IO.Directory]::CreateDirectory((Split-Path -Parent $targetNotifier)) | Out-Null
+Copy-Item -LiteralPath (Join-Path $sourceRoot 'scripts\codex-discord-notify.ps1') -Destination $targetNotifier -Force
+
+if (-not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
+    [Environment]::SetEnvironmentVariable('CODEX_DISCORD_WEBHOOK_URL', $DiscordWebhookUrl, 'User')
+    $env:CODEX_DISCORD_WEBHOOK_URL = $DiscordWebhookUrl
+}
+
+$installedConfig = Read-TextFile -Path $targetConfig
 $verification = @(
     (Select-String -LiteralPath $targetConfig -Pattern '^model = "gpt-5\.6-sol"$' -Quiet),
     (Select-String -LiteralPath $targetConfig -Pattern '^model_reasoning_effort = "xhigh"$' -Quiet),
+    (Select-String -LiteralPath $targetConfig -Pattern '^notify = \[$' -Quiet),
+    $installedConfig.Contains((ConvertTo-TomlBasicString -Value $targetNotifier)),
     (Select-String -LiteralPath $targetConfig -Pattern '^\s*"weekly-limit",\s*$' -Quiet),
     (Select-String -LiteralPath $targetAgentsFile -Pattern '<!-- codex-status-router:start -->' -Quiet),
-    (Test-Path -LiteralPath (Join-Path $targetSkill 'SKILL.md') -PathType Leaf)
+    (Test-Path -LiteralPath (Join-Path $targetSkill 'SKILL.md') -PathType Leaf),
+    (Test-Path -LiteralPath $targetNotifier -PathType Leaf)
 )
 if ($verification -contains $false) { throw 'Installation verification failed.' }
 
@@ -194,5 +308,11 @@ Write-Host 'Codex Status Router installed successfully.'
 Write-Host "Config: $targetConfig"
 Write-Host "Instructions: $targetAgentsFile"
 Write-Host "Skill: $targetSkill"
+Write-Host "Discord notifier: $targetNotifier"
+if (-not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
+    Write-Host 'Discord webhook: saved in the current user environment.'
+} else {
+    Write-Host 'Discord webhook: not changed. Pass -DiscordWebhookUrl to configure it.'
+}
 if (Test-Path -LiteralPath $backupRoot) { Write-Host "Backup: $backupRoot" }
 Write-Host 'Restart Codex to load the new configuration.'

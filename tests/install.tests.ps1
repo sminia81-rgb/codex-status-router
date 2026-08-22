@@ -3,7 +3,8 @@ Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-status-router-test-' + [guid]::NewGuid().ToString('N'))
-$codexHome = Join-Path $testRoot '.codex'
+$testUserProfile = Join-Path $testRoot 'User Profile'
+$codexHome = Join-Path $testUserProfile '.codex'
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
 function Assert-True {
@@ -12,12 +13,28 @@ function Assert-True {
 }
 
 try {
+    $invalidProfile = Join-Path $testRoot 'Invalid Webhook Profile'
+    $invalidCodexHome = Join-Path $invalidProfile '.codex'
+    $invalidWebhookRejected = $false
+    try {
+        & (Join-Path $repoRoot 'scripts\install.ps1') `
+            -TargetUserProfile $invalidProfile `
+            -TargetCodexHome $invalidCodexHome `
+            -DiscordWebhookUrl 'http://example.com/not-discord'
+    }
+    catch {
+        $invalidWebhookRejected = $true
+    }
+    Assert-True $invalidWebhookRejected 'Invalid Discord webhook URLs must be rejected.'
+    Assert-True (-not (Test-Path -LiteralPath $invalidCodexHome)) 'Rejected webhook input must not make partial changes.'
+
     [System.IO.Directory]::CreateDirectory($codexHome) | Out-Null
     [System.IO.File]::WriteAllText(
         (Join-Path $codexHome 'config.toml'),
         @'
 model = "gpt-5.6-terra"
 model_reasoning_effort = "medium"
+notify = ["legacy-notifier.exe"]
 custom_key = true
 
 [tui]
@@ -31,20 +48,39 @@ hooks = true
     )
     [System.IO.File]::WriteAllText((Join-Path $codexHome 'AGENTS.md'), "# Existing instructions`n", $utf8NoBom)
 
-    & (Join-Path $repoRoot 'scripts\install.ps1') -TargetUserProfile $testRoot -TargetCodexHome $codexHome
-    & (Join-Path $repoRoot 'scripts\install.ps1') -TargetUserProfile $testRoot -TargetCodexHome $codexHome
+    & (Join-Path $repoRoot 'scripts\install.ps1') -TargetUserProfile $testUserProfile -TargetCodexHome $codexHome
+    & (Join-Path $repoRoot 'scripts\install.ps1') -TargetUserProfile $testUserProfile -TargetCodexHome $codexHome
 
     $config = [System.IO.File]::ReadAllText((Join-Path $codexHome 'config.toml'))
     $agents = [System.IO.File]::ReadAllText((Join-Path $codexHome 'AGENTS.md'))
+    $notifier = Join-Path $codexHome 'scripts\codex-discord-notify.ps1'
     Assert-True ($config -match '(?m)^model = "gpt-5\.6-sol"$') 'Sol must be the default model.'
     Assert-True ($config -match '(?m)^model_reasoning_effort = "xhigh"$') 'xhigh must be the default effort.'
+    Assert-True (([regex]::Matches($config, '(?m)^notify\s*=')).Count -eq 1) 'Notify config must be idempotent.'
+    Assert-True ($config.Contains((ConvertTo-Json -InputObject $notifier -Compress))) 'Notify must use the target profile path.'
     Assert-True ($config -match 'weekly-limit') 'The weekly status item must be present.'
     Assert-True ($config -match '(?m)^custom_key = true$') 'Existing top-level config must be preserved.'
     Assert-True ($config -match '(?m)^theme = "dark"$') 'Existing TUI config must be preserved.'
     Assert-True (([regex]::Matches($agents, '<!-- codex-status-router:start -->')).Count -eq 1) 'Install must be idempotent.'
     Assert-True ($agents -match '# Existing instructions') 'Existing AGENTS.md content must be preserved.'
-    Assert-True (Test-Path -LiteralPath (Join-Path $testRoot '.agents\skills\adaptive-model-router\SKILL.md')) 'Router skill must be installed.'
+    Assert-True (Test-Path -LiteralPath (Join-Path $testUserProfile '.agents\skills\adaptive-model-router\SKILL.md')) 'Router skill must be installed.'
+    Assert-True (Test-Path -LiteralPath $notifier -PathType Leaf) 'Discord notifier must be installed.'
     Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $codexHome 'backups') -Directory).Count -ge 2) 'Each run must create a backup.'
+
+    $previousWebhook = [Environment]::GetEnvironmentVariable('CODEX_DISCORD_WEBHOOK_URL', 'Process')
+    $previousSkipLegacy = [Environment]::GetEnvironmentVariable('CODEX_NOTIFY_SKIP_LEGACY', 'Process')
+    try {
+        $env:CODEX_DISCORD_WEBHOOK_URL = 'invalid://no-network'
+        $env:CODEX_NOTIFY_SKIP_LEGACY = '1'
+        $powershell = (Get-Command 'powershell.exe' -ErrorAction Stop).Source
+        $testNotification = '{"type":"agent-turn-complete","thread-id":"test-thread","cwd":"C:\\work","last-assistant-message":"Done"}'
+        & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $notifier $testNotification
+        Assert-True ($LASTEXITCODE -eq 0) 'Notifier must fail open for an invalid webhook in normal mode.'
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('CODEX_DISCORD_WEBHOOK_URL', $previousWebhook, 'Process')
+        [Environment]::SetEnvironmentVariable('CODEX_NOTIFY_SKIP_LEGACY', $previousSkipLegacy, 'Process')
+    }
 
     $codexCommand = Get-Command codex -ErrorAction SilentlyContinue
     if ($null -ne $codexCommand) {
