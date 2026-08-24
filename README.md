@@ -45,6 +45,49 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 .\scripts\install.ps1 -TargetUserProfile 'C:\Users\another-user'
 ```
 
+## 여러 계정과 병렬 터미널 실행
+
+[`scripts/codex-account-launchers.ps1`](scripts/codex-account-launchers.ps1)을
+PowerShell 프로필에서 dot-source하면 `cx`, `cx2`, `cx3`, `cx4`, `cx81`,
+`cx812` 명령을 사용할 수 있습니다. 앞의 네 명령은 기본 `~/.codex` 인증을
+공유하고, 뒤의 두 명령은 별도의 `CODEX_HOME`을 사용합니다. 각 호출은 서로
+독립적인 새 Codex 세션을 엽니다.
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.codex\scripts" | Out-Null
+Copy-Item .\scripts\codex-account-launchers.ps1 "$HOME\.codex\scripts\"
+Add-Content $PROFILE '. "$HOME\.codex\scripts\codex-account-launchers.ps1"'
+. $PROFILE
+```
+
+보조 계정의 기본 저장 위치는 `~/.codex-accounts/secondary`입니다. 다른 위치를
+쓰려면 프로필에서 스크립트를 불러오기 전에 환경 변수를 지정하세요.
+
+```powershell
+$env:CODEX_SECONDARY_HOME = "$HOME\.codex-accounts\work"
+. "$HOME\.codex\scripts\codex-account-launchers.ps1"
+```
+
+보조 계정은 해당 홈으로 한 번 로그인해야 합니다.
+
+```powershell
+$previousCodexHome = $env:CODEX_HOME
+try {
+  $env:CODEX_HOME = "$HOME\.codex-accounts\secondary"
+  codex login
+} finally {
+  if ($null -eq $previousCodexHome) {
+    Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue
+  } else {
+    $env:CODEX_HOME = $previousCodexHome
+  }
+}
+```
+
+이 스크립트에는 인증 토큰이나 계정 이메일이 포함되지 않습니다. 실행 편의를
+위해 모든 launcher가 approvals와 sandbox를 건너뛰므로 신뢰하는 로컬 환경에서만
+사용하세요.
+
 ## Discord 완료 알림
 
 Discord 서버에서 웹훅 URL을 만든 뒤 현재 Windows 사용자에만 저장합니다. URL을
